@@ -48,3 +48,10 @@ resource "helm_release" "alb_controller" {
     value = var.vpc_id
   }
 }
+
+# This ensures Terraform processes the Helm chart in the same module
+resource "null_resource" "dependency_getter" {
+  triggers = {
+    instance_type = var.eks_instance_type
+  }
+}
