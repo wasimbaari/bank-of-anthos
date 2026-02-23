@@ -1,9 +1,8 @@
+
 module "lb_role" {
   source    = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   role_name = "${var.environment}_eks_lb_controller"
-
   attach_load_balancer_controller_policy = true
-
   oidc_providers = {
     main = {
       provider_arn               = module.eks.oidc_provider_arn
@@ -17,41 +16,10 @@ resource "helm_release" "alb_controller" {
   repository = "https://aws.github.io/eks-charts"
   chart      = "aws-load-balancer-controller"
   namespace  = "kube-system"
-
-  set {
-    name  = "clusterName"
-    value = module.eks.cluster_name
-  }
-
-  set {
-    name  = "serviceAccount.create"
-    value = "true"
-  }
-
-  set {
-    name  = "serviceAccount.name"
-    value = "aws-load-balancer-controller"
-  }
-
-  set {
-    name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-    value = module.lb_role.iam_role_arn
-  }
-
-  set {
-    name  = "region"
-    value = "ap-south-1"
-  }
-
-  set {
-    name  = "vpcId"
-    value = var.vpc_id
-  }
-}
-
-# This ensures Terraform processes the Helm chart in the same module
-resource "null_resource" "dependency_getter" {
-  triggers = {
-    instance_type = var.eks_instance_type
-  }
+  set { name = "clusterName"; value = module.eks.cluster_name }
+  set { name = "serviceAccount.create"; value = "true" }
+  set { name = "serviceAccount.name"; value = "aws-load-balancer-controller" }
+  set { name = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"; value = module.lb_role.iam_role_arn }
+  set { name = "region"; value = "ap-south-1" }
+  set { name = "vpcId"; value = var.vpc_id }
 }
