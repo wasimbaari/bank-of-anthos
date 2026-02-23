@@ -1,0 +1,139 @@
+name: "Terraform Infrastructure Pipeline"
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'terraform/environments/prod/**'
+      - 'modules/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'terraform/environments/prod/**'
+      - 'modules/**'
+      - '.github/workflows/**'
+
+# STRICT SECURITY: These permissions are required for OIDC to request a JWT token from AWS
+permissions:
+  id-token: write 
+  contents: read  
+  pull-requests: write # Required to post Checkov/Plan comments on PRs
+  security-events: write # Required to upload Checkov SARIF reports to GitHub Security tab
+
+jobs:
+  # ---------------------------------------------------------
+  # JOB 1: SECURITY SCANNING & TERRAFORM PLAN
+  # ---------------------------------------------------------
+  plan:
+    name: "Checkov Scan & Terraform Plan"
+    runs-on: ubuntu-latest
+    
+    # Define environment variables used across this job
+    env:
+      AWS_REGION: "ap-south-1"
+      TF_WORKING_DIR: 'terraform/environments/prod'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      # Shift-Left Security: Scan the Terraform code BEFORE touching AWS
+      - name: Run Checkov Security Scan
+        id: checkov
+        uses: bridgecrewio/checkov-action@master
+        with:
+          directory: ${{ env.TF_WORKING_DIR }}
+          framework: terraform
+          output_format: sarif
+          output_file_path: checkov.sarif
+          soft_fail: true # Set to false later if you want the pipeline to hard-stop on security failures
+
+      # Upload Security Report to GitHub Security Tab
+      - name: Upload SARIF report
+        uses: github/codeql-action/upload-sarif@v3
+        if: always() # Ensure this runs even if Checkov finds violations
+        with:
+          sarif_file: checkov.sarif
+
+      # Securely Authenticate to AWS using OIDC (No Access Keys!)
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          # Replace this ARN with the one outputted from our oidc-github.tf file earlier
+          role-to-assume: "arn:aws:iam::000710252076:role/prod-github-actions-role" 
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7" # Pinned version
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Terraform Format Check
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform fmt -check
+
+      - name: Terraform Plan
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        id: plan
+        run: terraform plan -out=tfplan -no-color
+
+      # Save the plan file so the 'Apply' job uses the EXACT same plan
+      - name: Upload Terraform Plan Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}/tfplan
+          retention-days: 1
+
+  # ---------------------------------------------------------
+  # JOB 2: TERRAFORM APPLY (Requires Manual Approval)
+  # ---------------------------------------------------------
+  apply:
+    name: "Terraform Apply"
+    needs: plan # Wait for the plan job to finish successfully
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    runs-on: ubuntu-latest
+    
+    # This triggers the GitHub Environment manual approval we set up in Step 1
+    environment: production 
+
+    env:
+      AWS_REGION: "ap-south-1"
+      TF_WORKING_DIR: 'terraform/environments/prod'
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: "arn:aws:iam::000710252076:role/prod-github-actions-role"
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.5.7"
+
+      - name: Terraform Init
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform init
+
+      - name: Download Terraform Plan Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ env.TF_WORKING_DIR }}
+
+      # Execute the exact plan we reviewed
+      - name: Terraform Apply
+        working-directory: ${{ env.TF_WORKING_DIR }}
+        run: terraform apply -auto-approve tfplan
